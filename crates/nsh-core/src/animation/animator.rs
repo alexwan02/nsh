@@ -334,6 +334,7 @@ mod tests {
             horizontal: false,
             scrollbar_visible: true,
             scroll_value: Some(2),
+            pull_value: None,
             keyboard_dismiss: Default::default(),
             mirrored: false,
         });
@@ -366,6 +367,7 @@ mod tests {
             horizontal: false,
             scrollbar_visible: true,
             scroll_value: Some(2),
+            pull_value: None,
             keyboard_dismiss: Default::default(),
             mirrored: false,
         });
