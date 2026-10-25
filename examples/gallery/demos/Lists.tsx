@@ -1,9 +1,10 @@
-import { computed, Input, List, Scroll, signal, Text, View, type YNode } from "nsh";
-import { type AnimatedNode, createAnimatedValue, LayoutAnimation } from "nsh/animated";
+import { cleanup, computed, effect, Input, List, Scroll, signal, Text, View, type YNode } from "nsh";
+import { reduceMotion } from "nsh/accessibility";
+import { Animated, type AnimatedNode, createAnimatedValue, Easing, LayoutAnimation } from "nsh/animated";
 import { platform } from "nsh/device";
 import { keyboardFrame, KeyboardAvoidingView, safeAreaInsets, Tab, Tabs } from "nsh/base";
 import { Icon, type IconName } from "../icons";
-import { Appear, Badge, bindRefresh, Button, colors, columnsFor, desktop, finish, hint, IconTile, Meter, mono, Press, radius, RoundButton, Section, Segmented, tabPress, type Tone, toneColor, toneTint } from "../ui";
+import { alpha, Appear, Badge, bindRefresh, Button, colors, columnsFor, desktop, finish, hint, IconTile, Meter, mono, Press, radius, RoundButton, Section, Segmented, tabPress, type Tone, toneColor, toneTint } from "../ui";
 
 const tones: Tone[] = ["accent", "info", "warn", "up", "danger", "neutral"];
 
@@ -343,41 +344,86 @@ const ranges = ["Today", "Yesterday", "This week", "This month", "This year", "A
 
 const indicators = [
   { value: "system", label: "System spinner" },
-  { value: "own", label: "Own indicator" },
+  { value: "custom", label: "Custom indicator" },
 ] as const;
 
-/** An app's own pull-to-refresh indicator, 72 tall, over the top of a scroll view: `pull` (its `pullValue`) moves it
- * in, fades it in and turns its arrow as the pull nears 72, where it refreshes, on the UI thread. */
-function OwnIndicator(props: { pull: AnimatedNode; refreshing: boolean }) {
+/** How tall the custom indicator is: where a pull refreshes, and the room it keeps while refreshing. */
+const INDICATOR = 72;
+
+/**
+ * A pull-to-refresh indicator drawn by the app, in the gallery's look, over the top of a scroll view: a round chip
+ * that travels in with the pull (`pull`, its `pullValue`), grows and fades in, turns its arrow over once the pull
+ * reaches the height where it refreshes, and spins while it refreshes. The pull drives all of it on the UI thread.
+ */
+function CustomIndicator(props: { pull: AnimatedNode; refreshing: boolean }) {
+  const turn = createAnimatedValue(0);
+  const spin = Animated.loop(Animated.timing(turn, { toValue: 1, duration: 900, easing: Easing.linear }));
+  effect(() => {
+    if (props.refreshing && !reduceMotion()) {
+      turn.set(0);
+      spin.start();
+    } else {
+      spin.stop();
+    }
+  });
+  cleanup(() => spin.stop());
+  const pull = props.pull;
   return (
     <View
       pointerEvents="none"
-      style={{
-        position: "absolute",
-        top: 0,
-        left: 0,
-        right: 0,
-        height: 72,
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 4,
-        opacity: props.pull.interpolate({ inputRange: [0, 36], outputRange: [0, 1] }),
-        transform: [{ translateY: props.pull.interpolate({ inputRange: [0, 72], outputRange: [-36, 0] }) }],
-      }}
+      style={{ position: "absolute", top: 0, left: 0, right: 0, height: INDICATOR, alignItems: "center", justifyContent: "center" }}
     >
-      <View style={{ transform: [{ rotate: props.pull.interpolate({ inputRange: [36, 72], outputRange: ["0deg", "180deg"] }) }] }}>
-        <Icon name="arrow-down" size={20} tint={colors.accent} />
+      <View
+        style={{
+          width: 40,
+          height: 40,
+          borderRadius: 20,
+          borderWidth: 1,
+          borderColor: colors.border,
+          backgroundColor: colors.raised,
+          ...finish.raised,
+          alignItems: "center",
+          justifyContent: "center",
+          opacity: pull.interpolate({ inputRange: [0, 24], outputRange: [0, 1] }),
+          transform: [
+            { translateY: pull.interpolate({ inputRange: [0, INDICATOR], outputRange: [-28, 0] }) },
+            { scale: pull.interpolate({ inputRange: [0, INDICATOR], outputRange: [0.6, 1] }) },
+          ],
+        }}
+      >
+        {/* The arrow points down while pulling and turns up once releasing refreshes. */}
+        <View
+          style={{
+            position: "absolute",
+            opacity: props.refreshing ? 0 : 1,
+            transform: [{ rotate: pull.interpolate({ inputRange: [INDICATOR * 0.5, INDICATOR], outputRange: ["0deg", "180deg"] }) }],
+          }}
+        >
+          <Icon name="arrow-down" size={18} tint={colors.accent} />
+        </View>
+        <View
+          style={{
+            position: "absolute",
+            width: 20,
+            height: 20,
+            borderRadius: 10,
+            borderWidth: 2,
+            borderColor: alpha(colors.accent, 0.25),
+            borderTopColor: colors.accent,
+            opacity: props.refreshing ? 1 : 0,
+            transform: [{ rotate: turn.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] }) }],
+          }}
+        />
       </View>
-      <Text style={{ fontSize: 12, color: colors.muted }}>{props.refreshing ? "Refreshing…" : "Pull past 72 to refresh"}</Text>
     </View>
   );
 }
 
-/** Horizontal scrolling, pull to refresh on a plain scroll view (the system spinner or the app's own), and an empty list. */
+/** Horizontal scrolling, pull to refresh on a plain scroll view (the system spinner or a custom indicator), and an empty list. */
 function More() {
   const refreshing = signal(false);
   const refreshed = signal(0);
-  const indicator = signal<"system" | "own">("system");
+  const indicator = signal<"system" | "custom">("system");
   const pull = createAnimatedValue(0);
   const range = signal("This week");
   const items = signal<{ n: number; tone: Tone }[]>([]);
@@ -394,14 +440,14 @@ function More() {
     change();
   };
   const cards = Array.from({ length: 1000 }, (_, i) => i);
-  const own = () => indicator() === "own";
+  const custom = () => indicator() === "custom";
   const page = (
     <Scroll
       style={{ flex: 1 }}
       refreshing={refreshing()}
       onRefresh={refresh}
       pullValue={pull}
-      refreshIndicator={own() ? { height: 72 } : undefined}
+      refreshIndicator={custom() ? { height: INDICATOR } : undefined}
     >
       <View style={{ padding: 16, gap: 16 }}>
         {/* `position: sticky`: in the flow, then at the top while the page scrolls under it. */}
@@ -429,7 +475,7 @@ function More() {
             <IconTile name="arrow-down" tint={refreshing() ? colors.accent : colors.text} />
             <View style={{ flex: 1, gap: 2 }}>
               <Text style={{ fontSize: 15, color: colors.text }}>{refreshing() ? "Refreshing…" : hint("Pull the page down", refreshKey ? `Refresh or ${refreshKey}` : "Refresh below")}</Text>
-              <Text style={{ fontSize: 13, color: colors.muted }}>{own() ? "The app's own indicator, from pullValue" : "The system spinner on a plain scroll view"}</Text>
+              <Text style={{ fontSize: 13, color: colors.muted }}>{custom() ? "An indicator the app draws, from pullValue" : "The system spinner on a plain scroll view"}</Text>
             </View>
             <View style={{ alignItems: "flex-end" }}>
               <Text style={{ fontSize: 28, fontWeight: "600", color: colors.text, fontVariant: ["tabular-nums"] }}>{refreshed()}</Text>
@@ -552,8 +598,8 @@ function More() {
   return (
     <View style={{ flex: 1 }}>
       {page}
-      <If when={own()}>
-        <OwnIndicator pull={pull} refreshing={refreshing()} />
+      <If when={custom()}>
+        <CustomIndicator pull={pull} refreshing={refreshing()} />
       </If>
     </View>
   );

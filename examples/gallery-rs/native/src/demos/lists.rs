@@ -655,12 +655,12 @@ struct Item {
 }
 
 /// The pull to refresh section: the spinner's state and the refreshes,
-/// whether the app draws its own indicator (`own`), and on desktops, whose
+/// whether the app draws a custom indicator (`custom`), and on desktops, whose
 /// mouse does not pull scroll views down, a button calling `refresh`.
 fn refresh_section(
     refreshing: Signal<bool>,
     refreshed: Signal<u32>,
-    own: Signal<bool>,
+    custom: Signal<bool>,
     refresh: impl Into<Listener<()>>,
     refresh_key: Option<String>,
 ) -> Section {
@@ -699,8 +699,8 @@ fn refresh_section(
                     )
                     .child(
                         text(move || {
-                            if own.get() {
-                                "The app's own indicator, from pull_value"
+                            if custom.get() {
+                                "An indicator the app draws, from pull_value"
                             } else {
                                 "The system spinner on a plain scroll view"
                             }
@@ -728,9 +728,9 @@ fn refresh_section(
     );
     let section = section.child(
         segmented()
-            .options(["System spinner", "Own indicator"].map(Segment::new))
-            .selected(move || u32::from(own.get()))
-            .on_change(move |&i: &u32| own.set(i == 1)),
+            .options(["System spinner", "Custom indicator"].map(Segment::new))
+            .selected(move || u32::from(custom.get()))
+            .on_change(move |&i: &u32| custom.set(i == 1)),
     );
     if !is_desktop() {
         return section;
@@ -950,53 +950,87 @@ fn empty_list() -> Section {
         )
 }
 
-/// An app's own pull-to-refresh indicator, 72 tall, over the top of a
-/// scroll view: `pull` (its `pull_value`) moves it in, fades it in and
-/// turns its arrow as the pull nears 72, where it refreshes, on the UI
-/// thread.
-fn own_indicator(pull: AnimatedValue, refreshing: Signal<bool>) -> impl IntoElement {
+/// How tall the custom indicator is: where a pull refreshes, and the room
+/// it keeps while refreshing.
+const INDICATOR: f32 = 72.0;
+
+/// A pull-to-refresh indicator drawn by the app, in the gallery's look, over
+/// the top of a scroll view: a round chip that travels in with the pull
+/// (`pull`, its `pull_value`), grows and fades in, turns its arrow over once
+/// the pull reaches the height where it refreshes, and spins while it
+/// refreshes. The pull drives all of it on the UI thread.
+fn custom_indicator(pull: AnimatedValue, refreshing: Signal<bool>) -> impl IntoElement {
+    let turn = animated_value(0.0);
+    let spin = Animation::timing(&turn, 360.0, Timing::new(900.0, Easing::Linear)).looped(None);
+    let running = spin.clone();
+    effect(move || {
+        if refreshing.get() && !reduce_motion() {
+            turn.set(0.0);
+            let _ = running.start();
+        } else {
+            running.stop();
+        }
+    });
+    cleanup(move || spin.stop());
     view()
         .pointer_events(PointerEvents::None)
         .absolute()
         .top_0()
         .left_0()
         .right_0()
-        .h(px(72.0))
+        .h(px(INDICATOR))
         .items_center()
         .justify_center()
-        .gap_1()
-        .bind_opacity(&pull.interpolate(&[0.0, 36.0], &[0.0, 1.0]))
-        .bind_translate_y(&pull.interpolate(&[0.0, 72.0], &[-36.0, 0.0]))
         .child(
             view()
-                .bind_rotate(&pull.interpolate(&[36.0, 72.0], &[0.0, 180.0]))
+                .size(px(40.0))
+                .rounded_full()
+                .border_1()
+                .border_color(colors::BORDER)
+                .bg(colors::RAISED)
+                .finish(Finish::Raised)
+                .items_center()
+                .justify_center()
+                .bind_opacity(&pull.interpolate(&[0.0, 24.0], &[0.0, 1.0]))
+                .bind_translate_y(&pull.interpolate(&[0.0, INDICATOR], &[-28.0, 0.0]))
+                .bind_scale(&pull.interpolate(&[0.0, INDICATOR], &[0.6, 1.0]))
+                // The arrow points down while pulling and turns up once
+                // releasing refreshes.
                 .child(
-                    icon()
-                        .name(IconName::ArrowDown)
-                        .size(20.0)
-                        .tint(colors::ACCENT),
+                    view()
+                        .absolute()
+                        .opacity(move || if refreshing.get() { 0.0_f32 } else { 1.0 })
+                        .bind_rotate(
+                            &pull.interpolate(&[INDICATOR * 0.5, INDICATOR], &[0.0, 180.0]),
+                        )
+                        .child(
+                            icon()
+                                .name(IconName::ArrowDown)
+                                .size(18.0)
+                                .tint(colors::ACCENT),
+                        ),
+                )
+                .child(
+                    view()
+                        .absolute()
+                        .size(px(20.0))
+                        .rounded_full()
+                        .border(px(2.0))
+                        .border_color(colors::TRACK)
+                        .border_t_color(colors::ACCENT)
+                        .opacity(move || if refreshing.get() { 1.0_f32 } else { 0.0 })
+                        .bind_rotate(&turn),
                 ),
-        )
-        .child(
-            text(move || {
-                if refreshing.get() {
-                    "Refreshing…"
-                } else {
-                    "Pull past 72 to refresh"
-                }
-            })
-            .text_size(px(12.0))
-            .text_color(colors::MUTED),
         )
 }
 
 /// Horizontal scrolling, pull to refresh on a plain scroll view (the
-/// system spinner or the app's own), and an empty list.
+/// system spinner or a custom indicator), and an empty list.
 #[component]
 fn More() -> impl IntoElement {
     let refreshing = signal(false);
     let refreshed = signal(0_u32);
-    let own = signal(false);
+    let custom = signal(false);
     let pull = animated_value(0.0);
     let range = signal("This week");
     // The refresh in progress.
@@ -1018,7 +1052,7 @@ fn More() -> impl IntoElement {
             .refreshing(refreshing)
             .on_refresh(on_refresh)
             .pull_value(&pull)
-            .refresh_indicator(move || own.get().then_some(px(72.0)))
+            .refresh_indicator(move || custom.get().then_some(px(INDICATOR)))
             .child(
                 view()
                     .p_4()
@@ -1026,7 +1060,7 @@ fn More() -> impl IntoElement {
                     .child(refresh_section(
                         refreshing,
                         refreshed,
-                        own,
+                        custom,
                         on_refresh,
                         refresh_key,
                     ))
@@ -1035,7 +1069,7 @@ fn More() -> impl IntoElement {
                     .child(empty_list()),
             ),
     );
-    page.child(when(own, move || own_indicator(pull, refreshing)))
+    page.child(when(custom, move || custom_indicator(pull, refreshing)))
 }
 
 /// The demo's tabs.
