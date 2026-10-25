@@ -550,6 +550,8 @@ fn run(app: App, width: f32, height: f32, environment: Environment, limits: Limi
         ui_sets: ui_sets(),
         runtime: None,
         data_dir: Some("/app-data".into()),
+        // The browser keeps what it downloads in its HTTP cache.
+        cache: nsh_engine::CacheOptions::off(),
         filesystem: Some(std::sync::Arc::new(filesystem::BrowserFileSystem {
             namespace,
         })),
@@ -1162,6 +1164,21 @@ pub unsafe extern "C" fn nsh_event(
             text: text("text"),
             count: num("count") as u32,
         },
+        // `{ bounds: { origin, size } }`, as handlers get it.
+        EventKind::CaretMove => {
+            let caret = value.get("bounds");
+            let n = |part: &str, c: &str| {
+                caret
+                    .and_then(|v| v.get(part))
+                    .and_then(|v| v.get(c))
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as f32
+            };
+            EventPayload::caret(nsh_core::Bounds {
+                origin: point(Points(n("origin", "x")), Points(n("origin", "y"))),
+                size: size(Points(n("size", "width")), Points(n("size", "height"))),
+            })
+        }
         EventKind::Host => EventPayload::Json(value),
         _ => match &value {
             serde_json::Value::Object(map) => EventPayload::Map(
@@ -1217,6 +1234,69 @@ pub unsafe extern "C" fn nsh_event(
         },
     };
     send(|app| app.control.dispatch_event(id, kind, payload))
+}
+
+/// `onPaste` of input `id`: what the user pasted, as JSON `{ text, files:
+/// [{ name, type, size }], uris }` and the files' bytes one after the other
+/// (they never cross as JS strings).
+///
+/// # Safety
+///
+/// `ptr..ptr + len` and `data..data + data_len` are memory from
+/// [`nsh_alloc`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_paste(
+    id: u32,
+    ptr: *const u8,
+    len: usize,
+    data: *const u8,
+    data_len: usize,
+) -> f64 {
+    // SAFETY: guaranteed by the caller.
+    let json = unsafe { string(ptr, len) };
+    // SAFETY: guaranteed by the caller.
+    let bytes: &[u8] = if data_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(data, data_len) }
+    };
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
+    let text = |v: &serde_json::Value, k: &str| {
+        v.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let mut paste = nsh_core::PasteEvent::new(text(&value, "text"));
+    let mut at = 0usize;
+    for file in value
+        .get("files")
+        .and_then(|f| f.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let size = file.get("size").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
+        let Some(part) = bytes.get(at..at + size) else {
+            break;
+        };
+        at += size;
+        paste.files.push(nsh_core::PastedFile::new(
+            text(file, "name"),
+            text(file, "type"),
+            part.to_vec(),
+        ));
+    }
+    paste.uris = value
+        .get("uris")
+        .and_then(|u| u.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|u| u.as_str().map(str::to_owned))
+        .collect();
+    send(|app| {
+        app.control
+            .dispatch_event(id, EventKind::Paste, EventPayload::Paste(Box::new(paste)))
+    })
 }
 
 thread_local! {
@@ -1374,9 +1454,13 @@ fn key_of(code: u32) -> Option<Key> {
 /// an auto-repeat. Returns the binding that fires, -1 for none (the key
 /// goes on) or -2 for a held key's repeat (consumed, nothing fires). JS
 /// reports a firing binding with [`nsh_key_command`].
+///
+/// `f64` keeps every `u32` binding ID positive in JS, including Rust
+/// shortcuts (`1 << 31` and up) and overlay Escape (`u32::MAX`), while
+/// leaving the negative sentinels distinct.
 #[unsafe(no_mangle)]
-pub extern "C" fn nsh_key(key: u32, modifiers: u32, editing: u32, repeat: u32) -> i32 {
-    let Some(key) = key_of(key) else { return -1 };
+pub extern "C" fn nsh_key(key: u32, modifiers: u32, editing: u32, repeat: u32) -> f64 {
+    let Some(key) = key_of(key) else { return -1.0 };
     let keystroke = Keystroke {
         modifiers: Modifiers {
             ctrl: modifiers & 1 != 0,
@@ -1392,9 +1476,9 @@ pub extern "C" fn nsh_key(key: u32, modifiers: u32, editing: u32, repeat: u32) -
         })
     });
     match found {
-        KeyMatch::None => -1,
-        KeyMatch::Held => -2,
-        KeyMatch::Fire(id) => id as i32,
+        KeyMatch::None => -1.0,
+        KeyMatch::Held => -2.0,
+        KeyMatch::Fire(id) => id as f64,
     }
 }
 
@@ -1442,6 +1526,13 @@ pub extern "C" fn nsh_pull(id: u32, distance: f32) -> f64 {
     })
 }
 
+/// Scroll view `id` came to rest (`onScrollEnd`, sent or not): the snapping
+/// animated values that follow it settle.
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_scroll_ended(id: u32) -> f64 {
+    send(|app| app.animation.scroll_ended(id))
+}
+
 /// The user zoomed zoomable scroll view `id` to `scale` (reported before
 /// the offset it scrolled to).
 #[unsafe(no_mangle)]
@@ -1465,16 +1556,26 @@ pub extern "C" fn nsh_pan(id: u32, phase: u32, tx: f32, ty: f32, vx: f32, vy: f3
             ffi::submit(&out.finish());
         }
         let (value_x, value_y) = app.animation.pan_values(id);
-        let payload = EventPayload::Pan {
-            translation: point(Points(tx), Points(ty)),
-            velocity_x: vx,
-            velocity_y: vy,
-            value_x: value_x.map(Points),
-            value_y: value_y.map(Points),
+        let payload = if phase == 3 {
+            EventPayload::PanCancelled {
+                translation: point(Points(tx), Points(ty)),
+                velocity_x: vx,
+                velocity_y: vy,
+                value_x: value_x.map(Points),
+                value_y: value_y.map(Points),
+            }
+        } else {
+            EventPayload::Pan {
+                translation: point(Points(tx), Points(ty)),
+                velocity_x: vx,
+                velocity_y: vy,
+                value_x: value_x.map(Points),
+                value_y: value_y.map(Points),
+            }
         };
         match phase {
             0 => app.control.dispatch_event(id, EventKind::PanStart, payload),
-            2 => app.control.dispatch_event(id, EventKind::PanEnd, payload),
+            2 | 3 => app.control.dispatch_event(id, EventKind::PanEnd, payload),
             _ => {}
         }
     })

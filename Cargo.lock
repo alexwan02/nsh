@@ -2951,8 +2951,10 @@ name = "nsh-core"
 version = "0.2.0"
 dependencies = [
  "cap-std",
+ "crc32fast",
  "flate2",
  "futures-util",
+ "httpdate",
  "imagesize 0.15.0",
  "libc",
  "log",
@@ -3006,6 +3008,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.28.0",
  "ureq",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

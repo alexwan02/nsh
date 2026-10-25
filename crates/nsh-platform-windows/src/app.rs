@@ -90,6 +90,9 @@ pub enum AppSource {
 pub struct AppOptions {
     /// Log per-commit timings.
     pub trace: bool,
+    /// Logs the performance monitor's readings once a second (target
+    /// `nsh::perf`): frame rate, frame phases, commits, CPU, memory.
+    pub fps: bool,
     /// Where bundled assets are (for [`AppSource::Bundle`]); dev servers
     /// serve them themselves.
     pub asset_base: Option<AssetBase>,
@@ -118,6 +121,10 @@ pub struct AppOptions {
     /// system's data directory ([`nsh_engine::data_dir`]); an app that
     /// embeds nsh gives its own (its data directory + `/nsh`, say).
     pub data_dir: Option<PathBuf>,
+    /// Where the apps it runs keep their caches (the images they
+    /// downloaded) and how much each keeps: by default the system's cache
+    /// directory, each app's in `<dir>/<app id>`. See [`AppView::set_cache`].
+    pub cache: nsh_engine::CacheOptions,
     /// The apps' storage (`nsh/storage`), overriding the `storage.json` in
     /// their directory of [`data_dir`](Self::data_dir).
     pub storage: Option<Arc<dyn nsh_engine::StorageBackend>>,
@@ -132,6 +139,7 @@ impl Default for AppOptions {
     fn default() -> Self {
         AppOptions {
             trace: false,
+            fps: false,
             asset_base: None,
             app_id: "com.longbridge.nsh.host".to_owned(),
             title: "nsh".to_owned(),
@@ -140,6 +148,7 @@ impl Default for AppOptions {
             appearance: Appearance::System,
             limits: Limits::default(),
             data_dir: None,
+            cache: Default::default(),
             storage: None,
             host: nsh_engine::HostChannel::default(),
         }
@@ -198,6 +207,9 @@ impl AppView {
             dev: RefCell::new(None),
         });
         crate::system::watch_environment(&view.surface);
+        if view.options.borrow().fps {
+            view.surface.enable_fps();
+        }
         Ok(view)
     }
 
@@ -229,6 +241,13 @@ impl AppView {
         self.options.borrow_mut().limits = limits;
     }
 
+    /// Where the apps loaded from now on keep their caches (the images they
+    /// downloaded) and how much each keeps. The running app keeps the
+    /// caches it was loaded with.
+    pub fn set_cache(&self, cache: nsh_engine::CacheOptions) {
+        self.options.borrow_mut().cache = cache;
+    }
+
     /// Runs `app`, replacing what ran.
     pub fn load(&self, app: App) {
         let access = match &app {
@@ -253,6 +272,7 @@ impl AppView {
             ui_sets: ui_sets(),
             runtime: None,
             data_dir: options.data_dir.clone().or_else(nsh_engine::data_dir),
+            cache: options.cache.clone(),
             storage: options.storage.clone(),
             clock: Default::default(),
             context: Default::default(),

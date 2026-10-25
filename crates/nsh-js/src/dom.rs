@@ -1273,6 +1273,7 @@ fn set_prop(
         "rotation",
         "scrollValue",
         "pullValue",
+        "stickyHeaderOffset",
         "tooltip",
     ]
     .iter()

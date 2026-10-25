@@ -79,6 +79,9 @@ pub enum AppSource {
 pub struct AppOptions {
     /// Log per-commit timings.
     pub trace: bool,
+    /// Logs the performance monitor's readings once a second (`nsh::perf`:
+    /// frame rate, frame and commit costs, CPU, memory).
+    pub fps: bool,
     /// Where bundled assets are (for [`AppSource::Bundle`]); dev servers
     /// serve them themselves.
     pub asset_base: Option<AssetBase>,
@@ -108,6 +111,10 @@ pub struct AppOptions {
     /// system's data directory ([`nsh_engine::data_dir`]); an app that
     /// embeds nsh gives its own (its data directory + `/nsh`, say).
     pub data_dir: Option<PathBuf>,
+    /// Where the apps it runs keep their caches (the images they
+    /// downloaded) and how much each keeps: by default the system's cache
+    /// directory, each app's in `<dir>/<app id>`. See [`AppView::set_cache`].
+    pub cache: nsh_engine::CacheOptions,
     /// The apps' storage (`nsh/storage`), overriding the `storage.json` in
     /// their directory of [`data_dir`](Self::data_dir).
     pub storage: Option<Arc<dyn nsh_engine::StorageBackend>>,
@@ -122,6 +129,7 @@ impl Default for AppOptions {
     fn default() -> Self {
         AppOptions {
             trace: false,
+            fps: false,
             asset_base: None,
             app_id: "com.longbridge.nsh.host".to_owned(),
             title: "nsh".to_owned(),
@@ -130,6 +138,7 @@ impl Default for AppOptions {
             appearance: Appearance::System,
             limits: Limits::default(),
             data_dir: None,
+            cache: Default::default(),
             storage: None,
             host: nsh_engine::HostChannel::default(),
         }
@@ -205,6 +214,9 @@ impl AppView {
             dev: RefCell::new(None),
         });
         crate::system::watch_environment(&view.surface);
+        if view.options.borrow().fps {
+            view.surface.enable_fps();
+        }
         view
     }
 
@@ -231,6 +243,13 @@ impl AppView {
         self.options.borrow_mut().limits = limits;
     }
 
+    /// Where the apps loaded from now on keep their caches (the images they
+    /// downloaded) and how much each keeps. The running app keeps the
+    /// caches it was loaded with.
+    pub fn set_cache(&self, cache: nsh_engine::CacheOptions) {
+        self.options.borrow_mut().cache = cache;
+    }
+
     /// Runs `app`, replacing what ran.
     pub fn load(&self, app: App) {
         let access = match &app {
@@ -255,6 +274,7 @@ impl AppView {
             ui_sets: ui_sets(),
             runtime: None,
             data_dir: options.data_dir.clone().or_else(nsh_engine::data_dir),
+            cache: options.cache.clone(),
             storage: options.storage.clone(),
             clock: Default::default(),
             context: Default::default(),
@@ -352,6 +372,7 @@ fn initial_environment() -> Environment {
 
 /// Runs `source` in a window until it is closed.
 pub fn run_app(source: AppSource, options: AppOptions) -> glib::ExitCode {
+    prefer_gl_on_nvidia();
     // X11's WM_CLASS comes from the program name: the app's id, as the
     // `StartupWMClass` of the `.desktop` file `nsh package` writes (Wayland's
     // app id is the application id).
@@ -386,6 +407,23 @@ pub fn run_app(source: AppSource, options: AppOptions) -> glib::ExitCode {
     });
     // GTK must not parse the host's own arguments.
     app.run_with_args::<&str>(&[])
+}
+
+/// Draws with GSK's GL renderer instead of its Vulkan one (GTK's default
+/// since 4.16) under NVIDIA's driver, unless `GSK_RENDERER` chooses: there
+/// GSK's Vulkan frames cost the main thread several times as much (the
+/// gallery's Animations demo: ~9.5 ms of paint per frame and 73% CPU at
+/// 75 fps, against ~1 ms and 14% at 120 fps with GL; `docs/dev/linux.md`).
+fn prefer_gl_on_nvidia() {
+    if std::env::var_os("GSK_RENDERER").is_some()
+        || !std::path::Path::new("/proc/driver/nvidia/version").exists()
+    {
+        return;
+    }
+    // SAFETY: called before GTK starts, while this thread is the process'
+    // only one reading the environment (the engine and the dev client start
+    // with the window).
+    unsafe { std::env::set_var("GSK_RENDERER", "ngl") };
 }
 
 /// GNOME's window shortcuts: Ctrl+W closes the window, Ctrl+Q quits, F11

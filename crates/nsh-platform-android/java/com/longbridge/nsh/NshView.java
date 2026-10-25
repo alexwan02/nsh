@@ -19,6 +19,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
+import android.view.WindowInsetsAnimation;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
@@ -168,11 +169,14 @@ public class NshView extends FrameLayout {
      * @param trace log per-commit timings
      */
     public NshView(Context context, boolean trace) {
-        this(context, trace, new File(context.getFilesDir(), "nsh"));
+        this(context, trace, new File(context.getFilesDir(), "nsh"), new File(context.getCacheDir(), "nsh"));
     }
 
-    /** As {@link #NshView(Context, boolean)}, the apps keeping their data in {@code dataDir}. */
-    NshView(Context context, boolean trace, File dataDir) {
+    /**
+     * As {@link #NshView(Context, boolean)}, the apps keeping their data in {@code dataDir} and the images they
+     * download in {@code cacheDir}.
+     */
+    NshView(Context context, boolean trace, File dataDir, File cacheDir) {
         super(context);
         density = getResources().getDisplayMetrics().density;
         TextLayouts.cacheDir = context.getCacheDir();
@@ -192,12 +196,33 @@ public class NshView extends FrameLayout {
         // sets no soft input mode, this makes the system resize (and report
         // the keyboard as insets) instead of panning the window.
         setScrollContainer(true);
+        // The keyboard's curve and duration, as it starts to move: what makes
+        // room for it moves with it (`LayoutCurve::Keyboard`).
+        if (Build.VERSION.SDK_INT >= 30) {
+            setWindowInsetsAnimationCallback(new WindowInsetsAnimation.Callback(
+                    WindowInsetsAnimation.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+                @Override
+                public void onPrepare(WindowInsetsAnimation animation) {
+                    // Before the end state's insets are applied.
+                    if ((animation.getTypeMask() & WindowInsets.Type.ime()) == 0) return;
+                    keyboardDuration = animation.getDurationMillis();
+                    mounter.keyboardMotion(animation.getInterpolator(), keyboardDuration);
+                }
+
+                @Override
+                public WindowInsets onProgress(WindowInsets insets, java.util.List<WindowInsetsAnimation> running) {
+                    return insets;
+                }
+            });
+        }
         // The back key where the window has no OnBackInvokedCallback in
         // effect (below Android 13, or `enableOnBackInvokedCallback` off).
         addOnUnhandledKeyEventListener((v, e) -> onBackKey(e));
         // Apps keep their data in <dataDir>/<app id>: nsh in the files
         // directory unless the development host's test session says.
-        handle = Native.create(this, density, trace, dataDir.getPath());
+        // ... and the images they download in <cacheDir>/<app id>/images: nsh
+        // in the cache directory.
+        handle = Native.create(this, density, trace, dataDir.getPath(), cacheDir.getPath());
     }
 
     /**
@@ -253,6 +278,20 @@ public class NshView extends FrameLayout {
      */
     public void setStorageDirectory(File dir) {
         Native.setStorage(handle, dir == null ? null : dir.getPath());
+    }
+
+    /**
+     * Where the apps this view loads from now on keep their caches (the
+     * images they download, so they show again without a download and
+     * offline) and how much each keeps. The default
+     * ({@code NshCacheOptions.DEFAULT}): {@code nsh} in the Context's cache
+     * directory, each app in {@code <dir>/<app id>}, 256 MiB of images.
+     *
+     * @param options the options
+     */
+    public void setCacheOptions(NshCacheOptions options) {
+        Native.setCache(handle, options.location, options.directory == null ? null : options.directory.getPath(),
+                options.images, options.imagesMaxMegabytes);
     }
 
     /**
@@ -408,10 +447,17 @@ public class NshView extends FrameLayout {
      * Registers native component {@code name} ({@code nativeComponent(name, ...)}
      * in JS): {@code factory} makes one for every element created from now on.
      *
+     * Names under {@code nsh/} are NSH's own: registering one logs a warning
+     * and changes nothing.
+     *
      * @param name the name JS uses
      * @param factory makes the components (UI thread)
      */
     public void registerComponent(String name, NshComponent.Factory factory) {
+        if (name.startsWith("nsh/")) {
+            android.util.Log.w("nsh", "native component `" + name + "` is not registered: names under `nsh/` are NSH's");
+            return;
+        }
         mounter.components.put(name, factory);
     }
 
@@ -561,6 +607,8 @@ public class NshView extends FrameLayout {
     // --- Environment ---------------------------------------------------------
 
     private float keyboard;
+    /** How long the keyboard's last move took (ms; `keyboardFrame().duration`). */
+    private long keyboardDuration = 250;
     /** The host app's locale and text size ({@link #setLocale}, {@link #setFontScale}). */
     private java.util.Locale hostLocale;
     private float hostFontScale;
@@ -650,7 +698,7 @@ public class NshView extends FrameLayout {
         java.util.Locale locale = hostLocale != null ? hostLocale : java.util.Locale.getDefault();
         float fontScale = hostFontScale > 0 && !Float.isInfinite(hostFontScale) ? hostFontScale : c.fontScale;
         Native.environment(handle, new float[] {
-            top / density, right / density, bottom / density, left / density, ime / density, 0.25f, fontScale,
+            top / density, right / density, bottom / density, left / density, ime / density, keyboardDuration / 1000f, fontScale,
             android.text.TextUtils.getLayoutDirectionFromLocale(java.util.Locale.getDefault()) == LAYOUT_DIRECTION_RTL ? 1 : 0,
             // "Remove animations" sets the animator scale to 0.
             android.provider.Settings.Global.getFloat(getContext().getContentResolver(),

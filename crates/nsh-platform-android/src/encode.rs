@@ -306,6 +306,8 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                     e.float(c.start.0);
                     e.float(c.end.0);
                 }
+                // Animated offsets are the UI thread's graph's (`animation.rs`).
+                e.animation.push(MountItem::StickyCells { id, cells });
             }
             MountItem::LayoutDirection { rtl } => {
                 e.int(LAYOUT_DIRECTION);
@@ -1126,6 +1128,7 @@ fn layout_transition(e: &mut Encoded, t: Option<LayoutTransition>) {
         LayoutCurve::EaseOut => (2, 0.0),
         LayoutCurve::EaseInEaseOut => (3, 0.0),
         LayoutCurve::Spring { damping } => (4, damping),
+        LayoutCurve::Keyboard => (5, 0.0),
     };
     e.int(curve);
     e.float(damping);
@@ -1226,6 +1229,8 @@ fn input(e: &mut Encoded, c: &InputConfig) {
     });
     e.bool(c.rtl);
     e.bool(c.caret_hidden);
+    // `pasteBehavior`: whether a paste inserts its text.
+    e.bool(c.paste_behavior == nsh_core::PasteBehavior::Insert);
 }
 
 // --- Canvas drawings (`CanvasBox.java`) -------------------------------------
